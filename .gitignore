@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+catboost_info/
+
+*.pkl
+*.pq
+
+mlpipeline/artifacts/
+data/
+
+venv/
