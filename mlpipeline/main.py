@@ -36,9 +36,21 @@ def _save_submissions(cfg, test_df, ens_preds):
 
 def train(cfg):
     train_df = pd.read_parquet(cfg.path_to_train)
-    feature_df = pd.read_parquet(cfg.path_to_test_features)
 
-    train_df = pd.merge(train_df, feature_df, on=['app_id', 'date_part'])
+    feature_df = pd.read_parquet(cfg.path_to_test_features)[[
+        'app_id',
+        'date_part',
+        'worksalary_rur_amt',
+        'salary_last_days',
+        'bki_total_micro_max_limit',
+    ]]
+
+    train_df = pd.merge(
+        train_df,
+        feature_df,
+        on=['app_id', 'date_part'],
+        how='left'
+    )
 
     holdout_X = None
     holdout_y = None
@@ -93,9 +105,21 @@ def train(cfg):
 
 def inference(cfg):
     test_df = pd.read_parquet(cfg.path_to_test)
-    feature_df = pd.read_parquet(cfg.path_to_test_features)
 
-    test_df = pd.merge(test_df, feature_df, on=['app_id', 'date_part'])
+    feature_df = pd.read_parquet(cfg.path_to_test_features)[[
+        'app_id',
+        'date_part',
+        'worksalary_rur_amt',
+        'salary_last_days',
+        'bki_total_micro_max_limit',
+    ]]
+
+    test_df = pd.merge(
+        test_df,
+        feature_df,
+        on=['app_id', 'date_part'],
+        how='left'
+    )
 
 
     solver = Solver(cfg)

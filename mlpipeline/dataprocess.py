@@ -147,20 +147,11 @@ class DataProcess:
         cat_cols = [col for col in cat_cols if col in X.columns]
 
         if not is_transform:
-            # embarked_mode = X["Embarked"].mode(dropna=True)
-            fill_value = {
-                'basket_name': 'None',
-            }
-            # fill_value = {
-            #     'Age_by_initial': X.groupby('Initial')['Age'].median().to_dict(),
-            #     'Age': X['Age'].median(),
-            #     'Embarked': embarked_mode.iloc[0],
-            #     'Fare': X["Fare"].median()
-            # } 
+            fill_value = {'basket_name': 'missing'}
 
             num_cols = [col for col in num_cols if col not in fill_value]
             cat_cols = [col for col in cat_cols if col not in fill_value]
-            
+
             cat_fill_values = {}
             for col in cat_cols:
                 mode = X[col].mode(dropna=True)
@@ -187,20 +178,18 @@ class DataProcess:
             cat_cols = [col for col in cat_cols if col not in fill_value]
 
 
-
         for col_name, value in fill_value.items():
             if col_name in X.columns:
                 X[col_name] = X[col_name].fillna(value)
-        
 
         for col in cat_cols:
             if X[col].isna().any():
                 X[col] = X[col].fillna(cat_fill_values[col])
-        
+
         for col in num_cols:
             if X[col].isna().any():
                 X[col] = X[col].fillna(num_fill_values[col])
-        
+
         return X, na_artifacts
 
     def _preprocessing(self, X, num_cols, cat_cols, preprocess_cfg, is_transform):
@@ -365,32 +354,109 @@ class DataProcess:
         return X_out, out_num_cols, out_cat_cols, pp_artifacts
 
     def _feature_engineering_before_na(self, X, num_cols, cat_cols):
-        title_mapping = getattr(self.cfg, "title_mapping", {})
+        eps = 1e-6
 
-        # X["Initial"] = X["Name"].str.extract(r"([A-Za-z]+)\.", expand=False)
-        # X["Initial"] = X["Initial"].replace(title_mapping)
-        # X["Initial"] = X["Initial"].fillna("Other")
-        # cat_cols = self._append_if_missing(cat_cols, "Initial")
+        # numeric cast
+        float_cols = [
+            'req_loan_amount',
+            'req_term',
+            'rate',
+            'term',
+            'limit',
+            'eva',
+            'eva_perc',
+            'ncl',
+            'risk_level_map',
+            'variant_no'
+        ]
+
+        X = X.copy()
+
+        for col in float_cols:
+            if col in X.columns:
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+
+        g = X.groupby('app_id')
+
+        # ============================================================
+        # offer ~ request matching
+        # ============================================================
+        new_cols = pd.DataFrame({
+            'limit_to_req': X['limit'] / (X['req_loan_amount'] + 1),
+            'term_to_req': X['term'] / (X['req_term'] + 1),
+
+            'limit_diff': X['limit'] - X['req_loan_amount'],
+            'term_diff': X['term'] - X['req_term'],
+
+            'abs_limit_diff': (X['limit'] - X['req_loan_amount']).abs(),
+
+            'abs_term_diff': (X['term'] - X['req_term']).abs(),
+        }, index=X.index)
+
+        # ============================================================
+        # relative quality inside app_id
+        # ============================================================
+        new_cols['offers_cnt_per_app'] = (g['offer_id'].transform('count'))
+        new_cols['rate_rank_in_app'] = (g['rate'].rank(method='dense', ascending=True))
+        new_cols['limit_rank_in_app'] = (g['limit'].rank(method='dense', ascending=False))
+        new_cols['term_rank_in_app'] = (g['term'].rank(method='dense', ascending=False))
+        new_cols['eva_rank_in_app'] = (g['eva'].rank(method='dense', ascending=False) )
+        new_cols['ncl_rank_in_app'] = (g['ncl'].rank(method='dense', ascending=True))
+        new_cols['rate_diff_from_best'] = (X['rate'] - g['rate'].transform('min'))
+        new_cols['limit_diff_from_best'] = (g['limit'].transform('max') - X['limit'])
+        new_cols['eva_diff_from_best'] = (g['eva'].transform('max') - X['eva'])
+        new_cols['ncl_diff_from_best'] = (X['ncl'] - g['ncl'].transform('min'))
+        new_cols['limit_ratio_to_max'] = (X['limit'] /(g['limit'].transform('max') + eps) )
+        new_cols['rate_ratio_to_min'] = (X['rate'] /(g['rate'].transform('min') + eps))
+        new_cols['eva_ratio_to_max'] = (X['eva'] /(g['eva'].transform('max') + eps))
+
+        # ============================================================
+        # pairwise-style deltas
+        # ============================================================
+        rate_mean_in_app = g['rate'].transform('mean')
+        limit_mean_in_app = g['limit'].transform('mean')
+        term_mean_in_app = g['term'].transform('mean')
+        eva_mean_in_app = g['eva'].transform('mean')
+        ncl_mean_in_app = g['ncl'].transform('mean')
+
+        new_cols['delta_rate_vs_app_mean'] = (X['rate'] - rate_mean_in_app)
+        new_cols['delta_limit_vs_app_mean'] = ( X['limit'] - limit_mean_in_app)
+        new_cols['delta_term_vs_app_mean'] = ( X['term'] - term_mean_in_app )
+        new_cols['delta_eva_vs_app_mean'] = ( X['eva'] - eva_mean_in_app)
+        new_cols['delta_ncl_vs_app_mean'] = ( X['ncl'] - ncl_mean_in_app)
+        new_cols['rate_zscore_in_app'] = ( (X['rate'] - rate_mean_in_app) /(g['rate'].transform('std') + eps))
+        new_cols['limit_zscore_in_app'] = ((X['limit'] - limit_mean_in_app) /(g['limit'].transform('std') + eps))
+        new_cols['eva_zscore_in_app'] = ((X['eva'] - eva_mean_in_app) /(g['eva'].transform('std') + eps))
+        new_cols['delta_rate_to_best'] = (X['rate'] - g['rate'].transform('min'))
+        new_cols['delta_limit_to_best'] = (g['limit'].transform('max') - X['limit'])
+        new_cols['delta_eva_to_best'] = ( g['eva'].transform('max') - X['eva'] )
+        new_cols['rate_pct_in_app'] = (g['rate'].rank(pct=True, ascending=True))
+        new_cols['limit_pct_in_app'] = ( g['limit'].rank(pct=True, ascending=False))
+        new_cols['eva_pct_in_app'] = (g['eva'].rank(pct=True, ascending=False))
+
+        # ============================================================
+        # trade-off features
+        # ============================================================
+        new_cols['limit_per_rate'] = (X['limit'] / (X['rate'] + eps))
+        new_cols['eva_per_rate'] = (X['eva'] / (X['rate'] + eps) )
+        new_cols['eva_to_ncl'] = ( X['eva'] / (X['ncl'] + eps))
+        new_cols['limit_to_ncl'] = (X['limit'] / (X['ncl'] + eps))
+
+        # ============================================================
+        # position bias
+        # ============================================================
+        new_cols['variant_rank_in_app'] = (g['variant_no'].rank(method='dense',ascending=True))
+
+        new_cols['is_first_variant'] = (new_cols['variant_rank_in_app'] == 1).astype(int)
+
+        X = pd.concat([X, new_cols], axis=1)
+
+        for col in new_cols.columns:
+            num_cols = self._append_if_missing(num_cols, col)
 
         return X, num_cols, cat_cols
 
     def _feature_engineering_after_na(self, X, num_cols, cat_cols):
-        # fare_bins = getattr(self.cfg, "fare_bins", None)
-        # fare_labels = getattr(self.cfg, "fare_labels", None)
-
-        # X["Family_Size"] = (X["Parch"] + X["SibSp"] + 1).astype(int)
-        # X["Alone"] = (X["Family_Size"] == 1).astype(int).astype(str)
-
-        # X["Fare_cat"] = pd.cut(
-        #     X["Fare"],
-        #     bins=fare_bins,
-        #     labels=fare_labels,
-        #     include_lowest=True,
-        # ).astype(str)
-
-        # num_cols = self._append_if_missing(num_cols, "Family_Size")
-        # cat_cols = self._append_if_missing(cat_cols, "Alone")
-        # cat_cols = self._append_if_missing(cat_cols, "Fare_cat")
 
         return X, num_cols, cat_cols
 
